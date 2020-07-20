@@ -305,7 +305,7 @@ class WaveGlow(torch.nn.Module):
                         0), self.n_early_size, spect.size(2)).normal_()
                 audio = torch.cat((sigma*z, audio),1)
             if progress_callback:
-                progress_callback.emit((k-self.n_flows+1)/self.n_flows)
+                progress_callback.emit((self.n_flows-k)/self.n_flows*100)
             if elapsed_callback:
                 elapsed = time.time()-start
                 elapsed_callback.emit(int(elapsed))
