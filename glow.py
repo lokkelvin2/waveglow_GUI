@@ -28,7 +28,8 @@ import copy
 import torch
 from torch.autograd import Variable
 import torch.nn.functional as F
-
+from tqdm import tqdm
+import time
 
 @torch.jit.script
 def fused_add_tanh_sigmoid_multiply(input_a, input_b, n_channels):
@@ -177,9 +178,9 @@ class WN(torch.nn.Module):
 
 class WaveGlow(torch.nn.Module):
     def __init__(self, n_mel_channels, n_flows, n_group, n_early_every,
-                 n_early_size, WN_config):
+                 n_early_size, WN_config, use_cuda = True):
         super(WaveGlow, self).__init__()
-
+        self.use_cuda = use_cuda
         self.upsample = torch.nn.ConvTranspose1d(n_mel_channels,
                                                  n_mel_channels,
                                                  1024, stride=256)
@@ -248,7 +249,9 @@ class WaveGlow(torch.nn.Module):
         output_audio.append(audio)
         return torch.cat(output_audio,1), log_s_list, log_det_W_list
 
-    def infer(self, spect, sigma=1.0):
+    def infer(self, spect, sigma=1.0, 
+            progress_callback = None,
+            elapsed_callback = None):
         spect = self.upsample(spect)
         # trim conv artifacts. maybe pad spec to kernel multiple
         time_cutoff = self.upsample.kernel_size[0] - self.upsample.stride[0]
@@ -257,18 +260,25 @@ class WaveGlow(torch.nn.Module):
         spect = spect.unfold(2, self.n_group, self.n_group).permute(0, 2, 1, 3)
         spect = spect.contiguous().view(spect.size(0), spect.size(1), -1).permute(0, 2, 1)
 
-        if spect.type() == 'torch.cuda.HalfTensor':
-            audio = torch.cuda.HalfTensor(spect.size(0),
-                                          self.n_remaining_channels,
-                                          spect.size(2)).normal_()
+        if self.use_cuda:
+            if spect.type() == 'torch.cuda.HalfTensor':
+                audio = torch.cuda.HalfTensor(spect.size(0),
+                                              self.n_remaining_channels,
+                                              spect.size(2)).normal_()
+            else:
+                audio = torch.cuda.FloatTensor(spect.size(0),
+                                               self.n_remaining_channels,
+                                               spect.size(2)).normal_()
         else:
-            audio = torch.cuda.FloatTensor(spect.size(0),
-                                           self.n_remaining_channels,
-                                           spect.size(2)).normal_()
+            audio = torch.FloatTensor(spect.size(0),
+                                      self.n_remaining_channels,
+                                      spect.size(2)).normal_()
 
         audio = torch.autograd.Variable(sigma*audio)
-
-        for k in reversed(range(self.n_flows)):
+        start = time.time()
+        for k in tqdm(reversed(range(self.n_flows)),
+                        total = self.n_flows, 
+                        desc = 'Infer'):
             n_half = int(audio.size(1)/2)
             audio_0 = audio[:,:n_half,:]
             audio_1 = audio[:,n_half:,:]
@@ -283,11 +293,22 @@ class WaveGlow(torch.nn.Module):
             audio = self.convinv[k](audio, reverse=True)
 
             if k % self.n_early_every == 0 and k > 0:
-                if spect.type() == 'torch.cuda.HalfTensor':
-                    z = torch.cuda.HalfTensor(spect.size(0), self.n_early_size, spect.size(2)).normal_()
+                if self.use_cuda:
+                    if spect.type() == 'torch.cuda.HalfTensor':
+                        z = torch.cuda.HalfTensor(spect.size(
+                            0), self.n_early_size, spect.size(2)).normal_()
+                    else:
+                        z = torch.cuda.FloatTensor(spect.size(
+                            0), self.n_early_size, spect.size(2)).normal_()
                 else:
-                    z = torch.cuda.FloatTensor(spect.size(0), self.n_early_size, spect.size(2)).normal_()
+                     z = torch.FloatTensor(spect.size(
+                        0), self.n_early_size, spect.size(2)).normal_()
                 audio = torch.cat((sigma*z, audio),1)
+            if progress_callback:
+                progress_callback.emit((k-self.n_flows+1)/self.n_flows)
+            if elapsed_callback:
+                elapsed = time.time()-start
+                elapsed_callback.emit(int(elapsed))
 
         audio = audio.permute(0,2,1).contiguous().view(audio.size(0), -1).data
         return audio
