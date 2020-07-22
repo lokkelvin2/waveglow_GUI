@@ -251,7 +251,13 @@ class WaveGlow(torch.nn.Module):
 
     def infer(self, spect, sigma=1.0, 
             progress_callback = None,
-            elapsed_callback = None):
+            elapsed_callback = None,
+            get_interruptflag = None):
+        if get_interruptflag != None:       # Botch/bodge job of allowing an 
+            if get_interruptflag() == False:# external thread to interrupt this
+                return                      # inference function. If you have any 
+                                            # ideas on how to reduce the performance
+                                            # impact, please let me know. Thanks!
         spect = self.upsample(spect)
         # trim conv artifacts. maybe pad spec to kernel multiple
         time_cutoff = self.upsample.kernel_size[0] - self.upsample.stride[0]
@@ -279,6 +285,9 @@ class WaveGlow(torch.nn.Module):
         for k in tqdm(reversed(range(self.n_flows)),
                         total = self.n_flows, 
                         desc = 'Infer'):
+            if get_interruptflag != None:
+                if get_interruptflag() == False:
+                    return
             n_half = int(audio.size(1)/2)
             audio_0 = audio[:,:n_half,:]
             audio_1 = audio[:,n_half:,:]
@@ -310,6 +319,9 @@ class WaveGlow(torch.nn.Module):
                 elapsed = time.time()-start
                 elapsed_callback.emit(int(elapsed))
 
+        if get_interruptflag != None:
+            if get_interruptflag() == False:
+                return
         audio = audio.permute(0,2,1).contiguous().view(audio.size(0), -1).data
         return audio
 
